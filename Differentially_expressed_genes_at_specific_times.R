@@ -33,27 +33,27 @@ samples <- list("NSE" = c("NSE1", "NSE2", "NSE3", "NSE4"),
 
 
 for (sample in names(samples)) {
-  # 定义实验组和对照组
+
   sampleCondition <- factor(ifelse(colnames(counts) %in% samples[[sample]], "T", "C"),
                             levels = c("C", "T"))
   
-  # 创建 DGEList 对象
+
   exp_count <- DGEList(counts = counts, group = sampleCondition, genes = rownames(counts))
   
-  # 估计离散度
+
   exp_count <- estimateDisp(exp_count)
   
-  # 差异表达分析
+
   DEGs <- exactTest(exp_count, pair = c("C", "T"))
   
-  # 筛选 logFC >= 1 且 PValue < 0.01 的基因
+
   idx <- which((abs(DEGs$table$logFC) >= 1) & DEGs$table$PValue < 0.01)
   DEGs_filtered <- DEGs[idx,]
   
-  # 转换为数据框
+
   DEGs_filtered <- as.data.frame(DEGs_filtered$table)
   DEGs_filtered$ID <- rownames(DEGs_filtered)
   
-  # 保存结果
+
   write.csv(DEGs_filtered, file = paste0("/data3/users/Qiuqoo/CM_ZJU/DEG_DMG/DEG/DEGs_", sample, "_logFC_1_P_0.01.csv"))
 }
