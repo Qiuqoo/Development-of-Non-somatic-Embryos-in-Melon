@@ -1,0 +1,192 @@
+#===============================================================================
+
+required_pkgs <- c("tidyverse", "reshape2", "pbapply", "pheatmap", "patchwork")
+for (pkg in required_pkgs) if (!require(pkg, character.only=TRUE)) install.packages(pkg)
+
+library(tidyverse)
+library(pbapply)
+library(patchwork)
+library(tidyverse)
+
+
+cg  <- read_tsv("/data3/users/Qiuqoo/CM_ZJU/WGBS/merged_gene_promoter_CG_avg.txt")
+chg <- read_tsv("/data3/users/Qiuqoo/CM_ZJU/WGBS/merged_gene_promoter_CHG_avg.txt")
+chh <- read_tsv("/data3/users/Qiuqoo/CM_ZJU/WGBS/merged_gene_promoter_CHH_avg.txt")
+
+
+common_genes <- Reduce(intersect, list(cg$gene_id, chg$gene_id, chh$gene_id))
+cg  <- cg  %>% filter(gene_id %in% common_genes)
+chg <- chg %>% filter(gene_id %in% common_genes)
+chh <- chh %>% filter(gene_id %in% common_genes)
+
+
+cg  <- cg[order(cg$gene_id), ]
+chg <- chg[order(chg$gene_id), ]
+chh <- chh[order(chh$gene_id), ]
+
+
+meth_mat <- (cg[, 6:12] + chg[, 6:12] + chh[, 6:12]) / 3
+meth_df  <- bind_cols(gene_id = cg$gene_id, meth_mat)
+colnames(meth_df) <- c("id","GE","HE","LCE","LTE","NSE","PCE","PTE")
+
+write_csv(meth_df, "/data3/users/Qiuqoo/CM_ZJU/WGBS/merged_gene_promoter_methylation_avg.csv")
+
+#===============================================================================
+
+rna_file  <- "/data3/users/Qiuqoo/CM_ZJU/correlation/RNAseq_counts_mean.csv"
+atac_file <- "/data3/users/Qiuqoo/CM_ZJU/correlation/atac_peak_counts.csv"
+meth_file <- "/data3/users/Qiuqoo/CM_ZJU/correlation/merged_gene_promoter_methylation_avg.csv"  # 甲基化矩阵
+
+
+timepoints <- c("NSE","GE","HE","PTE","LTE","LCE","PCE")
+
+rna_df  <- read.csv(rna_file,  row.names=1, check.names=FALSE)
+atac_df <- read.csv(atac_file, row.names=1, check.names=FALSE)
+meth_df <- read.csv(meth_file, row.names=1, check.names=FALSE)
+
+
+rna_df  <- rna_df[, timepoints]
+atac_df <- atac_df[, timepoints]
+meth_df <- meth_df[, timepoints]
+
+
+rna_df <- rna_df[rowSums(rna_df) >= 10, ]
+
+min_var_threshold <- 1e-6
+valid_genes <- rownames(rna_df)[var_rna > min_var_threshold & var_atac > min_var_threshold & var_meth > min_var_threshold]
+
+
+rna_df <- rna_df[valid_genes, ]
+atac_df <- atac_df[valid_genes, ]
+meth_df <- meth_df[valid_genes, ]
+
+
+common_genes <- Reduce(intersect, list(rownames(rna_df), rownames(atac_df), rownames(meth_df)))
+rna_df  <- rna_df[common_genes, ]
+atac_df <- atac_df[common_genes, ]
+meth_df <- meth_df[common_genes, ]
+
+#===============================================================================
+
+to_long <- function(mat, assay_name, value_name){
+  mat %>%
+    as.data.frame() %>%
+    rownames_to_column("gene_id") %>%
+    pivot_longer(-gene_id, names_to="time", values_to=value_name) %>%
+    mutate(assay = assay_name,
+           time  = factor(time, levels=timepoints))
+}
+
+
+
+normalize_minmax_row <- function(df){
+
+  row_min <- apply(df, 1, min)
+  row_max <- apply(df, 1, max)
+
+  return(t(apply(df, 1, function(x) (x - min(x)) / (max(x) - min(x)))))
+}
+
+
+rna_df_norm  <- normalize_minmax_row(rna_df)
+atac_df_norm <- normalize_minmax_row(atac_df)
+meth_df_norm <- normalize_minmax_row(meth_df)
+colnames(rna_df_norm) <- timepoints
+colnames(atac_df_norm) <- timepoints
+colnames(meth_df_norm) <- timepoints
+
+
+expr_long <- to_long(rna_df_norm,  "Expression",    "value")
+atac_long <- to_long(atac_df_norm, "Accessibility", "value")
+meth_long <- to_long(meth_df_norm, "Methylation",   "value")
+
+calc_corr <- function(g){
+  x <- as.numeric(rna_df_norm[g,])
+  y <- as.numeric(atac_df_norm[g,])
+  z <- as.numeric(meth_df_norm[g,])
+  
+  if (any(is.na(c(x, y, z)))) {
+    return(c(r_atac = NA, p_atac = NA, r_meth = NA, p_meth = NA, r_am = NA, p_am = NA))
+  }
+
+  ca <- cor.test(x, y)$estimate
+  pa <- cor.test(x, y)$p.value
+  cb <- cor.test(x, z)$estimate
+  pb <- cor.test(x, z)$p.value
+  cc <- cor.test(y, z)$estimate
+  pc <- cor.test(y, z)$p.value
+  
+  c(r_atac = ca, p_atac = pa, r_meth = cb, p_meth = pb, r_am = cc, p_am = pc)
+}
+
+
+corr_mat <- t(pbsapply(common_genes, calc_corr))
+
+corr_df  <- as.data.frame(corr_mat) %>%
+  rownames_to_column("gene_id") %>%
+  mutate(
+    padj_atac = p.adjust(p_atac, method="BH"),
+    padj_meth = p.adjust(p_meth, method="BH"),
+    padj_am   = p.adjust(p_am,   method="BH")
+  )
+
+write_csv(corr_df, "/data3/users/Qiuqoo/CM_ZJU/correlation/gene_timepoint_pairwise_correlations.csv")
+
+#===============================================================================
+
+
+combined <- bind_rows(expr_long, atac_long, meth_long)
+
+
+sig_pos <- corr_df %>% filter(r_atac.cor>0, padj_atac<0.6) %>% pull(gene_id)
+sig_neg <- corr_df %>% filter(r_atac.cor<0, padj_atac<0.6) %>% pull(gene_id)
+combined <- combined %>%
+  mutate(group = case_when(
+    gene_id %in% sig_pos ~ "pos",
+    gene_id %in% sig_neg ~ "neg",
+    TRUE                 ~ "other"
+  )) %>%
+  filter(group!="other")
+
+
+summary_df <- combined %>%
+  group_by(group, assay, time) %>%
+  summarize(
+    mean = mean(value),
+    se   = sd(value)/sqrt(n()),
+    .groups="drop"
+  )
+
+library(dplyr)
+
+ggplot(summary_df, aes(x=time, y=mean, color=assay, fill=assay, group=assay)) +
+  geom_smooth(method="loess", size=1, alpha=1, span=0.7) +  
+  #geom_ribbon(aes(ymin=mean-0.05, ymax=mean+0.05), alpha=0.4, color=NA) +  
+  facet_wrap(~ group, nrow=1) +
+  scale_color_manual(values=c(Expression="firebrick",
+                              Accessibility="steelblue",
+                              Methylation="darkgreen")) +
+  scale_fill_manual(values=c(Expression="firebrick",
+                             Accessibility="steelblue",
+                             Methylation="darkgreen")) +
+  labs(title="Multi-omics Trajectories ± SE",
+       x="Timepoint", y="Z-scored value") +
+  theme_minimal() +
+  theme(legend.position="bottom")
+
+
+ggplot(summary_df, aes(x=time, y=mean, color=assay, fill=assay, group=assay)) +
+  geom_line(size=1) +
+  geom_ribbon(aes(ymin=mean-se, ymax=mean+se), alpha=0.3, color=NA) +
+  facet_wrap(~ group, nrow=1) +
+  scale_color_manual(values=c(Expression="firebrick",
+                              Accessibility="steelblue",
+                              Methylation="darkgreen")) +
+  scale_fill_manual(values=c(Expression="firebrick",
+                             Accessibility="steelblue",
+                             Methylation="darkgreen")) +
+  labs(title="Multi-omics Trajectories ± SE",
+       x="Timepoint", y="Z-scored value") +
+  theme_minimal() +
+  theme(legend.position="bottom")
+
